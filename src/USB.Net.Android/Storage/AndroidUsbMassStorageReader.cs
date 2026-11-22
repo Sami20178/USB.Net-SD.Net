@@ -17,6 +17,7 @@ public sealed class AndroidUsbMassStorageReader : IDisposable
     private const int CbwLength = 31;
     private const int CswLength = 13;
     private readonly UsbDeviceConnection _connection;
+    private readonly UsbInterface _usbInterface;
     private readonly UsbEndpoint _bulkIn;
     private readonly UsbEndpoint _bulkOut;
     private readonly int _timeoutMilliseconds;
@@ -29,11 +30,13 @@ public sealed class AndroidUsbMassStorageReader : IDisposable
 
     private AndroidUsbMassStorageReader(
         UsbDeviceConnection connection,
+        UsbInterface usbInterface,
         UsbEndpoint bulkIn,
         UsbEndpoint bulkOut,
         int timeoutMilliseconds)
     {
         _connection = connection;
+        _usbInterface = usbInterface;
         _bulkIn = bulkIn;
         _bulkOut = bulkOut;
         _timeoutMilliseconds = timeoutMilliseconds;
@@ -103,7 +106,7 @@ public sealed class AndroidUsbMassStorageReader : IDisposable
                 throw new IOException("Could not claim the USB mass-storage interface.");
 
             var reader = new AndroidUsbMassStorageReader(
-                connection, bulkIn, bulkOut, timeoutMilliseconds);
+                connection, selectedInterface, bulkIn, bulkOut, timeoutMilliseconds);
             reader.ReadCapacity();
             return reader;
         }
@@ -235,7 +238,7 @@ public sealed class AndroidUsbMassStorageReader : IDisposable
             return;
 
         _disposed = true;
-        _connection.ReleaseInterface(_bulkIn.Interface);
+        _connection.ReleaseInterface(_usbInterface);
         _connection.Close();
         _connection.Dispose();
     }
