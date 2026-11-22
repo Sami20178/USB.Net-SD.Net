@@ -22,51 +22,41 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 - Desktop mounted-volume enumeration through .NET DriveInfo.
 - Android USB host enumeration for devices declaring the USB mass-storage class.
 - Android USB permission status checks, permission request initiation and permission-result receiver.
-- Android USB storage access through the system folder picker: select a mounted USB volume, keep its permission, list files recursively, read files and create new files.
-- Read-only SCSI USB Mass Storage BOT transport: open a compatible interface, query capacity and read logical blocks with READ(10).
-- Read-only MBR/GPT partition-table detection with GPT CRC validation and capacity-bound checks. MBR extended partitions (types 0x05, 0x0F and 0x85) are traversed through bounded EBR chains to discover logical partitions.
-- Android system folder picker and persistent read/write URI permission.
-- Recursive, read-only SAF enumeration of files and subfolders.
-- Android SAF reading and creation of new destination documents.
-
-## Android USB permission flow
-
-1. Create an action unique to your app, for example `com.example.myapp.USB_PERMISSION`.
-2. Create the permission PendingIntent with `AndroidUsbPermissionManager.CreatePermissionResultIntent()`.
-3. Create `AndroidUsbPermissionReceiver` with the same action and subscribe to `PermissionResultReceived`.
-4. Call `Register(context)` and keep the returned `IDisposable` while the Activity needs the receiver.
-5. Call `RequestPermission(device, pendingIntent)`.
-6. When the event arrives, check `HasPermission(device)` again before opening or communicating with the USB device.
-7. Dispose the registration when finished.
+- Android USB storage access through Android's system folder picker and Storage Access Framework.
+- Read-only SCSI USB Mass Storage BOT transport with READ CAPACITY(10) and READ(10).
+- Read-only MBR/GPT partition-table detection, GPT CRC validation, and extended MBR/EBR chain traversal.
+- Read-only FAT32 boot-sector/BPB parsing with geometry, FAT sizing, root-cluster and partition-bound validation.
 
 ## Direct USB block-device access (read-only)
 
-`AndroidUsbMassStorageReader.Open(usbManager, device)` opens a compatible SCSI transparent-command / Bulk-Only Transport interface after Android USB permission is granted. It queries capacity with READ CAPACITY(10), then `ReadBlocks(lba, count)` reads logical blocks using SCSI READ(10). This implementation is read-only: it does not issue write, format, erase, or mount commands.
+After Android USB permission is granted, open a compatible device with `AndroidUsbMassStorageReader.Open(usbManager, device)`. The reader queries capacity and reads logical blocks. It does not issue write, format, erase, or mount commands.
 
-This is a raw block reader with read-only MBR/GPT partition-table detection. `ReadPartitionTable()` returns partition bounds and basic metadata, including MBR logical partitions discovered through extended boot records (EBRs). Extended-container entries are returned with the scheme `MBR-Extended`; logical volumes use `MBR-Logical`. FAT16/FAT32/exFAT directory and allocation parsing, USB devices using other protocols, and physical-device validation are still outstanding. Keep using the SAF client for normal file and folder access until those parts are implemented and tested.
+Call `ReadPartitionTable()` to discover MBR/GPT partitions. For a returned partition, call `ReadFat32Volume(partition)` to read its first logical block and validate the FAT32 boot sector. The returned `Fat32VolumeInfo` contains sector and cluster geometry, FAT count and size, volume size, root-directory cluster, FSInfo/backup-sector locations, volume serial, optional label, and cluster count.
+
+The parser validates the 0x55AA signature, sector-size agreement with the USB device, FAT32 BPB layout fields, partition bounds, FAT capacity, and root-cluster bounds. `IsSpecCompliantFat32` is true when the cluster count reaches the official FAT32 minimum of 65,525. Structurally FAT32-style volumes below that threshold can still be parsed, but the flag remains false.
+
+Only the boot sector and filesystem geometry are read at this stage. FAT allocation chains, directories, and file contents are not implemented yet. Use the Android SAF client for normal file access until raw filesystem reading is completed and tested.
 
 ## Android USB filesystem access
 
-The Android host app creates `AndroidUsbNetClient(context)` and launches `AndroidUsbNetClient.OpenUsbStoragePickerIntent()`. The user selects the mounted USB drive (preferably its root) in Android's system picker. Pass the result to `SaveSelectedUsbStorage()`, then use `EnumerateUsbStorageAsync()` to list files and folders, `OpenRead()` to read a file, or `CopyFileToUsbAsync()` to create a new file.
-
-`GetConnectedUsbDevicesAsync()` separately lists USB mass-storage devices visible through Android USB host mode. USB host detection and filesystem access are different: a detected USB device is not necessarily mounted as a browsable file volume. The SAF picker is the supported file-level route when Android exposes the drive there.
+Create `AndroidUsbNetClient(context)`, launch `OpenUsbStoragePickerIntent()`, and let the user select the mounted USB drive. Save the returned permission with `SaveSelectedUsbStorage()`. Then use `EnumerateUsbStorageAsync()`, `OpenRead()`, or `CopyFileToUsbAsync()`.
 
 ## Android SD-card integration
 
-The host application launches `AndroidSdNetClient.CreateFolderPickerIntent()` and passes the result to `SaveSelectedFolder()`. It can then call `EnumerateSelectedFolderAsync()` to recursively list all visible files and folders below that selected location. Enumeration is read-only and returns content URIs, not ordinary filesystem paths. Use `OpenRead()` to read a listed file.
+Launch `AndroidSdNetClient.CreateFolderPickerIntent()` and pass the result to `SaveSelectedFolder()`. Use `EnumerateSelectedFolderAsync()` to list files and folders recursively and `OpenRead()` to read a listed file.
 
 ## Limitations
 
-- SAF enumeration depends on the selected storage provider. Providers may omit metadata or restrict folders.
-- The recursive listing is synchronous internally because Android's ContentResolver query API is synchronous; cancellation is checked between queries and rows.
-- Direct USB block reading is implemented for SCSI transparent-command / Bulk-Only Transport devices. Filesystem parsing and mounting are not yet implemented; ordinary USB file access still uses Android SAF.
-- The Android SAF stream-based copy and Core path-based sync engine are separate; a unified two-way sync engine is still needed.
+- FAT32 directory entries, FAT cluster chains, and file-content extraction are not implemented yet.
+- FAT32 boot-sector parsing has not been compiled or tested on a physical device.
+- Direct USB block reading supports SCSI transparent-command / Bulk-Only Transport devices only.
+- SAF enumeration depends on the selected Android storage provider.
 - Android SD-card selection is user-driven; the app does not silently scan storage.
-- This code has not yet been built or tested on a physical Fire tablet.
+- No GitHub Actions workflow is required.
 
 ## Build
 
-Requires the .NET 8 SDK. Android builds additionally require the .NET Android workload.
+Requires the .NET 8 SDK and the .NET Android workload for Android projects.
 
 ```sh
 dotnet build src/USB.Net.Core/USB.Net.Core.csproj
@@ -76,12 +66,6 @@ dotnet build src/USB.Net.Android/USB.Net.Android.csproj
 dotnet build src/SD.Net.Android/SD.Net.Android.csproj
 ```
 
-No GitHub Actions workflow is required; build locally with the .NET SDK.
+## Safety
 
-## Safety behavior
-
-- Existing destination files are classified as conflicts when their size or timestamp differs.
-- Conflicts are skipped during path-based copy.
-- The path-based copy operation uses create-new semantics, so a file that appears after preview is not overwritten.
-- Android SAF copy creates a new document and does not intentionally overwrite an existing document.
-- The library does not delete source files.
+All raw USB block operations in this module are read-only. No write, erase, format, or partition-modification command is implemented.
