@@ -257,7 +257,6 @@ public sealed class AndroidUsbMassStorageReader : IDisposable
             throw new IOException("The FAT32 file exceeds the configured read limit.");
         if (file.SizeBytes == 0) return Array.Empty<byte>();
         ValidateCluster(file.FirstCluster, volume);
-        ulong clusterBytes = (ulong)volume.BytesPerSector * volume.SectorsPerCluster;
         ulong firstData = (ulong)volume.ReservedSectorCount + (ulong)volume.FatCount * volume.SectorsPerFat;
         byte[] result = new byte[checked((int)file.SizeBytes)];
         var visited = new HashSet<uint>();
