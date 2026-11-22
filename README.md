@@ -24,7 +24,7 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 - Android USB permission status checks, permission request initiation and permission-result receiver.
 - Android USB storage access through the system folder picker: select a mounted USB volume, keep its permission, list files recursively, read files and create new files.
 - Read-only SCSI USB Mass Storage BOT transport: open a compatible interface, query capacity and read logical blocks with READ(10).
-- Read-only MBR/GPT partition-table detection with GPT CRC validation and capacity-bound checks.
+- Read-only MBR/GPT partition-table detection with GPT CRC validation and capacity-bound checks. MBR extended partitions (types 0x05, 0x0F and 0x85) are traversed through bounded EBR chains to discover logical partitions.
 - Android system folder picker and persistent read/write URI permission.
 - Recursive, read-only SAF enumeration of files and subfolders.
 - Android SAF reading and creation of new destination documents.
@@ -43,7 +43,7 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 
 `AndroidUsbMassStorageReader.Open(usbManager, device)` opens a compatible SCSI transparent-command / Bulk-Only Transport interface after Android USB permission is granted. It queries capacity with READ CAPACITY(10), then `ReadBlocks(lba, count)` reads logical blocks using SCSI READ(10). This implementation is read-only: it does not issue write, format, erase, or mount commands.
 
-This is a raw block reader with read-only MBR/GPT partition-table detection. `ReadPartitionTable()` returns partition bounds and basic metadata. FAT16/FAT32/exFAT directory and allocation parsing, USB devices using other protocols, and physical-device validation are still outstanding. Keep using the SAF client for normal file and folder access until those parts are implemented and tested.
+This is a raw block reader with read-only MBR/GPT partition-table detection. `ReadPartitionTable()` returns partition bounds and basic metadata, including MBR logical partitions discovered through extended boot records (EBRs). Extended-container entries are returned with the scheme `MBR-Extended`; logical volumes use `MBR-Logical`. FAT16/FAT32/exFAT directory and allocation parsing, USB devices using other protocols, and physical-device validation are still outstanding. Keep using the SAF client for normal file and folder access until those parts are implemented and tested.
 
 ## Android USB filesystem access
 

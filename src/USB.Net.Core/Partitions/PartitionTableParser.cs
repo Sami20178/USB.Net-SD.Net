@@ -31,9 +31,17 @@ public static class PartitionTableParser
         return protective ? ReadGpt(blockSize, capacity, readBlocks) : ReadMbr(mbr, capacity);
     }
 
-    private static IReadOnlyList<PartitionInfo> ReadMbr(byte[] mbr, ulong capacity)
+    private static bool IsExtendedPartition(byte type) =>
+        type is 0x05 or 0x0F or 0x85;
+
+    private static IReadOnlyList<PartitionInfo> ReadMbr(byte[] mbr, ulong capacity,
+        Func<uint, uint, byte[]> readBlocks)
     {
+        const int maxEbrChainLength = 256;
         var result = new List<PartitionInfo>();
+        var extendedContainers = new List<(int PrimaryIndex, uint BaseLba, uint BlockCount)>();
+
+        // First collect primary partitions and extended-container boundaries.
         for (int i = 0; i < 4; i++)
         {
             int offset = MbrOffset + i * MbrEntrySize;
@@ -42,12 +50,90 @@ public static class PartitionTableParser
             uint first = BinaryPrimitives.ReadUInt32LittleEndian(entry.Slice(8, 4));
             uint count = BinaryPrimitives.ReadUInt32LittleEndian(entry.Slice(12, 4));
             if (type == 0 || count == 0) continue;
+
             ulong endExclusive = (ulong)first + count;
             if (first == 0 || endExclusive > capacity)
                 throw new IOException($"MBR partition {i + 1} exceeds device capacity.");
-            result.Add(new PartitionInfo("MBR", i + 1, first, endExclusive - 1, count,
-                type, null, entry[0] == 0x80, null));
+
+            if (IsExtendedPartition(type))
+            {
+                result.Add(new PartitionInfo("MBR-Extended", i + 1, first,
+                    endExclusive - 1, count, type, null, entry[0] == 0x80,
+                    "Extended partition container"));
+                extendedContainers.Add((i + 1, first, count));
+            }
+            else
+            {
+                result.Add(new PartitionInfo("MBR", i + 1, first,
+                    endExclusive - 1, count, type, null, entry[0] == 0x80, null));
+            }
         }
+
+        // Each EBR's first entry describes a logical partition relative to that EBR.
+        // Its second entry links to the next EBR relative to the extended-container base.
+        int logicalIndex = 5;
+        foreach (var container in extendedContainers)
+        {
+            ulong containerStart = container.BaseLba;
+            ulong containerEndExclusive = containerStart + container.BlockCount;
+            uint currentEbr = container.BaseLba;
+            var visited = new HashSet<uint>();
+
+            for (int chainStep = 0; chainStep < maxEbrChainLength; chainStep++)
+            {
+                if (!visited.Add(currentEbr))
+                    throw new IOException("The MBR extended-partition chain contains a loop.");
+
+                if (currentEbr < containerStart || currentEbr >= containerEndExclusive)
+                    throw new IOException("An EBR lies outside its extended partition.");
+
+                byte[] ebr = ReadExact(readBlocks, currentEbr, 1, (uint)mbr.Length);
+                if (BinaryPrimitives.ReadUInt16LittleEndian(ebr.AsSpan(510, 2)) != 0xAA55)
+                    throw new IOException($"Invalid EBR signature at LBA {currentEbr}.");
+
+                var logicalEntry = ebr.AsSpan(MbrOffset, MbrEntrySize);
+                byte logicalType = logicalEntry[4];
+                uint relativeStart = BinaryPrimitives.ReadUInt32LittleEndian(logicalEntry.Slice(8, 4));
+                uint logicalCount = BinaryPrimitives.ReadUInt32LittleEndian(logicalEntry.Slice(12, 4));
+
+                if (logicalType != 0 && logicalCount != 0)
+                {
+                    ulong logicalStart = currentEbr + relativeStart;
+                    ulong logicalEndExclusive = logicalStart + logicalCount;
+                    if (relativeStart == 0 || logicalStart < containerStart ||
+                        logicalEndExclusive > containerEndExclusive || logicalEndExclusive > capacity)
+                        throw new IOException($"Logical MBR partition {logicalIndex} exceeds its extended container.");
+
+                    result.Add(new PartitionInfo("MBR-Logical", logicalIndex,
+                        logicalStart, logicalEndExclusive - 1, logicalCount,
+                        logicalType, null, logicalEntry[0] == 0x80, null));
+                    logicalIndex++;
+                }
+
+                var linkEntry = ebr.AsSpan(MbrOffset + MbrEntrySize, MbrEntrySize);
+                byte linkType = linkEntry[4];
+                uint linkRelativeStart = BinaryPrimitives.ReadUInt32LittleEndian(linkEntry.Slice(8, 4));
+                uint linkCount = BinaryPrimitives.ReadUInt32LittleEndian(linkEntry.Slice(12, 4));
+
+                if (linkType == 0 || linkCount == 0)
+                    break;
+                if (!IsExtendedPartition(linkType) || linkRelativeStart == 0)
+                    throw new IOException("The EBR chain contains an invalid link entry.");
+
+                ulong nextEbr = containerStart + linkRelativeStart;
+                ulong linkEndExclusive = nextEbr + linkCount;
+                if (nextEbr < containerStart || nextEbr >= containerEndExclusive ||
+                    linkEndExclusive > containerEndExclusive || nextEbr >= capacity ||
+                    nextEbr > uint.MaxValue)
+                    throw new IOException("The next EBR link points outside the extended partition.");
+
+                currentEbr = (uint)nextEbr;
+            }
+
+            if (visited.Count == maxEbrChainLength)
+                throw new IOException("The MBR extended-partition chain exceeds the 256-entry safety limit.");
+        }
+
         return result;
     }
 
