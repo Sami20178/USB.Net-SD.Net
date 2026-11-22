@@ -62,12 +62,14 @@ public static class Fat32DirectoryParser
             byte attributes = entry[11];
             if (attributes == LongNameAttribute)
             {
+                if ((first & 0x40) != 0)
+                    pendingLongNameEntries.Clear();
                 pendingLongNameEntries.Add(entry.ToArray());
                 continue;
             }
 
             string shortName = DecodeShortName(entry);
-            string name = TryDecodeLongName(pendingLongNameEntries, entry, shortName)
+            string name = TryDecodeLongName(pendingLongNameEntries, entry)
                 ?? shortName;
             pendingLongNameEntries.Clear();
 
@@ -103,8 +105,7 @@ public static class Fat32DirectoryParser
 
     private static string? TryDecodeLongName(
         IList<byte[]> parts,
-        ReadOnlySpan<byte> shortEntry,
-        string shortName)
+        ReadOnlySpan<byte> shortEntry)
     {
         if (parts.Count == 0)
             return null;
@@ -118,8 +119,10 @@ public static class Fat32DirectoryParser
         for (int index = parts.Count - 1; index >= 0; index--)
         {
             byte[] part = parts[index];
-            int expectedSequence = index + 1;
+            int expectedSequence = parts.Count - index;
+            bool hasLastFlag = (part[0] & 0x40) != 0;
             if ((part[0] & 0x1F) != expectedSequence ||
+                hasLastFlag != (index == 0) ||
                 part[11] != LongNameAttribute ||
                 part[12] != 0 ||
                 part[13] != expectedChecksum ||
@@ -138,7 +141,7 @@ public static class Fat32DirectoryParser
             return null;
 
         string result = new(characters.ToArray());
-        return result.IndexOfAny(['/', '\\\\']) >= 0 ? null : result;
+        return result.Contains('/') || result.Contains('\\\\') ? null : result;
     }
 
     private static void AppendNameCharacters(byte[] part, List<char> output)
