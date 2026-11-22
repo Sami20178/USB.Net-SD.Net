@@ -129,6 +129,124 @@ public sealed class AndroidUsbMassStorageReader : IDisposable
         return Fat32BootSectorParser.Parse(bootSector, LogicalBlockSize, partition.TotalBlocks);
     }
 
+    /// <summary>
+    /// Reads the root directory, or a selected subdirectory cluster, from a FAT32 partition.
+    /// The operation follows the FAT chain with cycle and size limits and never writes to storage.
+    /// </summary>
+    public IReadOnlyList<Fat32DirectoryEntry> ReadFat32Directory(
+        PartitionInfo partition,
+        Fat32VolumeInfo volume,
+        uint? directoryCluster = null,
+        int maxEntries = 10000,
+        int maxClusters = 4096,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(partition);
+        ArgumentNullException.ThrowIfNull(volume);
+        if (LogicalBlockSize == 0)
+            throw new InvalidOperationException("ReadCapacity must complete first.");
+        if (maxEntries <= 0 || maxEntries > 100000)
+            throw new ArgumentOutOfRangeException(nameof(maxEntries), "The entry limit must be between 1 and 100000.");
+        if (maxClusters <= 0 || maxClusters > 65536)
+            throw new ArgumentOutOfRangeException(nameof(maxClusters), "The cluster limit must be between 1 and 65536.");
+        if (volume.BytesPerSector != LogicalBlockSize)
+            throw new ArgumentException("The FAT32 sector size does not match this USB device.", nameof(volume));
+        if (volume.SectorsPerCluster == 0 || volume.SectorsPerFat == 0 ||
+            volume.ReservedSectorCount == 0 || volume.FatCount is not (1 or 2) ||
+            volume.TotalSectors == 0 || volume.TotalSectors > partition.TotalBlocks ||
+            volume.ClusterCount == 0)
+            throw new ArgumentException("The FAT32 volume geometry is invalid for directory reading.", nameof(volume));
+
+        ulong deviceBlocks = (ulong)LastLogicalBlockAddress + 1;
+        if (partition.FirstLba > uint.MaxValue || partition.FirstLba >= deviceBlocks ||
+            partition.TotalBlocks > deviceBlocks - partition.FirstLba)
+            throw new ArgumentOutOfRangeException(nameof(partition), "The partition lies outside the readable device range.");
+
+        ulong firstDataSector = checked((ulong)volume.ReservedSectorCount +
+            (ulong)volume.FatCount * volume.SectorsPerFat);
+        if (firstDataSector >= volume.TotalSectors)
+            throw new IOException("The FAT32 data region is outside the volume.");
+
+        ulong clusterBytes = checked((ulong)volume.BytesPerSector * volume.SectorsPerCluster);
+        if (clusterBytes > int.MaxValue)
+            throw new IOException("The FAT32 cluster is too large to read in memory.");
+
+        uint startCluster = directoryCluster ?? volume.RootDirectoryCluster;
+        ValidateCluster(startCluster, volume);
+
+        var entries = new List<Fat32DirectoryEntry>();
+        var visited = new HashSet<uint>();
+        var pendingLongNames = new List<byte[]>();
+        var fatSectorCache = new Dictionary<ulong, byte[]>();
+        uint currentCluster = startCluster;
+        int clustersRead = 0;
+        bool endMarkerFound = false;
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!visited.Add(currentCluster))
+                throw new IOException("A cycle was detected in the FAT32 directory cluster chain.");
+            if (++clustersRead > maxClusters)
+                throw new IOException("The FAT32 directory exceeded the configured cluster-read limit.");
+
+            ulong clusterIndex = currentCluster - 2UL;
+            ulong relativeDataSector = checked(firstDataSector +
+                clusterIndex * volume.SectorsPerCluster);
+            ulong clusterEndSector = checked(relativeDataSector + volume.SectorsPerCluster);
+            if (clusterEndSector > volume.TotalSectors)
+                throw new IOException("A FAT32 directory cluster points outside the volume.");
+
+            ulong absoluteSector = checked(partition.FirstLba + relativeDataSector);
+            if (absoluteSector > uint.MaxValue ||
+                absoluteSector + volume.SectorsPerCluster > deviceBlocks)
+                throw new IOException("A FAT32 directory cluster points outside the USB device.");
+
+            byte[] clusterData = ReadBlocks((uint)absoluteSector, volume.SectorsPerCluster, cancellationToken);
+            var parsed = Fat32DirectoryParser.Parse(clusterData, pendingLongNames, out endMarkerFound);
+            if (entries.Count + parsed.Count > maxEntries)
+                throw new IOException("The FAT32 directory exceeded the configured entry limit.");
+            entries.AddRange(parsed);
+            if (endMarkerFound)
+                return entries;
+
+            ulong fatByteOffset = checked((ulong)currentCluster * 4);
+            ulong fatSectorIndex = fatByteOffset / volume.BytesPerSector;
+            int fatEntryOffset = (int)(fatByteOffset % volume.BytesPerSector);
+            if (fatSectorIndex >= volume.SectorsPerFat)
+                throw new IOException("The FAT32 cluster entry lies outside the FAT.");
+
+            if (!fatSectorCache.TryGetValue(fatSectorIndex, out byte[]? fatSector))
+            {
+                ulong fatAbsoluteSector = checked(partition.FirstLba +
+                    volume.ReservedSectorCount + fatSectorIndex);
+                if (fatAbsoluteSector > uint.MaxValue ||
+                    fatAbsoluteSector >= partition.FirstLba + volume.TotalSectors)
+                    throw new IOException("The FAT32 allocation table lies outside the volume.");
+                fatSector = ReadBlocks((uint)fatAbsoluteSector, 1, cancellationToken);
+                fatSectorCache[fatSectorIndex] = fatSector;
+            }
+
+            uint nextCluster = BinaryPrimitives.ReadUInt32LittleEndian(
+                fatSector.AsSpan(fatEntryOffset, 4)) & 0x0FFFFFFF;
+            if (nextCluster >= 0x0FFFFFF8)
+                return entries;
+            if (nextCluster == 0 || nextCluster == 1 || nextCluster == 0x0FFFFFF7 ||
+                nextCluster is >= 0x0FFFFFF0 and <= 0x0FFFFFF6)
+                throw new IOException("The FAT32 directory chain contains a free, bad, or reserved cluster marker.");
+
+            ValidateCluster(nextCluster, volume);
+            currentCluster = nextCluster;
+        }
+    }
+
+    private static void ValidateCluster(uint cluster, Fat32VolumeInfo volume)
+    {
+        if (cluster < 2 || (ulong)cluster > volume.ClusterCount + 1)
+            throw new IOException("A FAT32 directory cluster number lies outside the data region.");
+    }
+
     public byte[] ReadBlocks(uint startingLba, uint blockCount, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();

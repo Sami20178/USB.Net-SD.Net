@@ -26,6 +26,7 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 - Read-only SCSI USB Mass Storage BOT transport with READ CAPACITY(10) and READ(10).
 - Read-only MBR/GPT partition-table detection, GPT CRC validation, and extended MBR/EBR chain traversal.
 - Read-only FAT32 boot-sector/BPB parsing with geometry, FAT sizing, root-cluster and partition-bound validation.
+- Read-only FAT32 directory enumeration for root and selected subdirectories, including validated VFAT long names, attributes, file sizes, FAT cluster-chain traversal, cycle detection, and configurable read limits.
 
 ## Direct USB block-device access (read-only)
 
@@ -35,7 +36,7 @@ Call `ReadPartitionTable()` to discover MBR/GPT partitions. For a returned parti
 
 The parser validates the 0x55AA signature, sector-size agreement with the USB device, FAT32 BPB layout fields, partition bounds, FAT capacity, and root-cluster bounds. `IsSpecCompliantFat32` is true when the cluster count reaches the official FAT32 minimum of 65,525. Structurally FAT32-style volumes below that threshold can still be parsed, but the flag remains false.
 
-Only the boot sector and filesystem geometry are read at this stage. FAT allocation chains, directories, and file contents are not implemented yet. Use the Android SAF client for normal file access until raw filesystem reading is completed and tested.
+Use `ReadFat32Directory(partition, volume)` to list the root directory, or pass a subdirectory's `FirstCluster` as `directoryCluster`. The method follows the FAT32 allocation chain, validates cluster bounds, detects loops, and applies configurable entry and cluster limits. It decodes valid VFAT long-name sequences and returns names, short aliases, attributes, first cluster and file size. Directory listing does not yet read file contents; file cluster-chain extraction is the next stage. Use the Android SAF client for ordinary file access until raw filesystem reading is fully tested.
 
 ## Android USB filesystem access
 
