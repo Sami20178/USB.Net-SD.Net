@@ -23,6 +23,7 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 - Android USB host enumeration for devices declaring the USB mass-storage class.
 - Android USB permission status checks, permission request initiation and permission-result receiver.
 - Android USB storage access through the system folder picker: select a mounted USB volume, keep its permission, list files recursively, read files and create new files.
+- Read-only SCSI USB Mass Storage BOT transport: open a compatible interface, query capacity and read logical blocks with READ(10).
 - Android system folder picker and persistent read/write URI permission.
 - Recursive, read-only SAF enumeration of files and subfolders.
 - Android SAF reading and creation of new destination documents.
@@ -36,6 +37,12 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 5. Call `RequestPermission(device, pendingIntent)`.
 6. When the event arrives, check `HasPermission(device)` again before opening or communicating with the USB device.
 7. Dispose the registration when finished.
+
+## Direct USB block-device access (read-only)
+
+`AndroidUsbMassStorageReader.Open(usbManager, device)` opens a compatible SCSI transparent-command / Bulk-Only Transport interface after Android USB permission is granted. It queries capacity with READ CAPACITY(10), then `ReadBlocks(lba, count)` reads logical blocks using SCSI READ(10). This implementation is read-only: it does not issue write, format, erase, or mount commands.
+
+This is a raw block reader, not yet a complete filesystem browser. FAT16/FAT32/exFAT directory and allocation parsing, partition-table support, USB devices using other protocols, and physical-device validation are still outstanding. Keep using the SAF client for normal file and folder access until those parts are implemented and tested.
 
 ## Android USB filesystem access
 
@@ -51,7 +58,7 @@ The host application launches `AndroidSdNetClient.CreateFolderPickerIntent()` an
 
 - SAF enumeration depends on the selected storage provider. Providers may omit metadata or restrict folders.
 - The recursive listing is synchronous internally because Android's ContentResolver query API is synchronous; cancellation is checked between queries and rows.
-- Raw USB mass-storage filesystem communication, mounting, and direct sector access are not implemented. USB file access uses Android's mounted-volume/SAF interface and requires the user to select the drive.
+- Direct USB block reading is implemented for SCSI transparent-command / Bulk-Only Transport devices. Filesystem parsing and mounting are not yet implemented; ordinary USB file access still uses Android SAF.
 - The Android SAF stream-based copy and Core path-based sync engine are separate; a unified two-way sync engine is still needed.
 - Android SD-card selection is user-driven; the app does not silently scan storage.
 - This code has not yet been built or tested on a physical Fire tablet.
