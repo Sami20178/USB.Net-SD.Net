@@ -117,8 +117,10 @@ public sealed class AndroidUsbMassStorageReader : IDisposable
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(partition);
         if (LogicalBlockSize == 0) throw new InvalidOperationException("ReadCapacity must complete first.");
+        ulong deviceBlockCount = (ulong)LastLogicalBlockAddress + 1;
         if (partition.FirstLba > uint.MaxValue || partition.TotalBlocks == 0 ||
-            partition.FirstLba + partition.TotalBlocks > (ulong)LastLogicalBlockAddress + 1)
+            partition.FirstLba >= deviceBlockCount ||
+            partition.TotalBlocks > deviceBlockCount - partition.FirstLba)
             throw new ArgumentOutOfRangeException(nameof(partition), "The partition lies outside the readable device range.");
         if (partition.TotalBlocks > uint.MaxValue)
             throw new NotSupportedException("This reader currently supports partitions with at most 2^32-1 logical blocks.");
