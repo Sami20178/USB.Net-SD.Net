@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using Android.Hardware.Usb;
+using USB.Net.Core.Partitions;
 
 namespace USB.Net.Android.Storage;
 
@@ -133,6 +134,16 @@ public sealed class AndroidUsbMassStorageReader : IDisposable
 
         LastLogicalBlockAddress = lastLba;
         LogicalBlockSize = blockSize;
+    }
+
+    /// <summary>Detects MBR or GPT partitions without writing to the device.</summary>
+    public IReadOnlyList<PartitionInfo> ReadPartitionTable()
+    {
+        ThrowIfDisposed();
+        if (LogicalBlockSize == 0)
+            throw new InvalidOperationException("ReadCapacity must complete first.");
+        return PartitionTableParser.Read(LogicalBlockSize, LastLogicalBlockAddress,
+            (lba, count) => ReadBlocks(lba, count));
     }
 
     /// <summary>
