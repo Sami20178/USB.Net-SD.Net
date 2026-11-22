@@ -68,7 +68,39 @@ static async Task TestOfflineCache()
         if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
 }
+static async Task TestWirelessTransfer()
+{
+    var root = Path.Combine(Path.GetTempPath(), "usb-net-wifi-test-" + Guid.NewGuid().ToString("N"));
+    var sourceDirectory = Path.Combine(root, "source");
+    var destinationDirectory = Path.Combine(root, "received");
+    Directory.CreateDirectory(sourceDirectory);
+    var sourcePath = Path.Combine(sourceDirectory, "wireless-test.txt");
+    var payload = Encoding.UTF8.GetBytes("USB.Net encrypted local Wi-Fi transfer test.");
+    await File.WriteAllBytesAsync(sourcePath, payload);
+    try
+    {
+        var probe = new TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        var port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        var code = WirelessFileTransfer.CreateInviteCode();
+        Assert(code.Length == 64, "Invite code length is incorrect.");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var receiveTask = WirelessFileTransfer.ReceiveOneFileAsync(
+            IPAddress.Loopback, port, code, destinationDirectory, cancellationToken: timeout.Token);
+        await Task.Delay(100, timeout.Token);
+        var sent = await WirelessFileTransfer.SendFileAsync(
+            IPAddress.Loopback.ToString(), port, code, sourcePath, cancellationToken: timeout.Token);
+        var received = await receiveTask;
+        Assert(sent.Sha256 == received.Sha256, "Transfer checksums differ.");
+        Assert(received.SizeBytes == payload.Length, "Received file size is incorrect.");
+        Assert((await File.ReadAllBytesAsync(received.FilePath)).SequenceEqual(payload),
+            "Received content differs.");
+    }
+    finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+}
 TestBootRegion();
 TestUpcase();
 await TestOfflineCache();
+await TestWirelessTransfer();
 Console.WriteLine("USB.Net.Core self-tests passed.");
