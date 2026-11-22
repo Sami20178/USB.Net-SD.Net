@@ -81,9 +81,18 @@ For ordinary Android file access, the USB and SD clients also support Android's 
 - The .NET 8 self-test project covers exFAT boot-region checksums and up-case normalization. The source has not yet been built with the .NET 8 SDK in this environment and has not been tested on a physical USB device.
 - No GitHub Actions workflow is required.
 
-## Build
+## Build and self-tests
 
-Requires the .NET 8 SDK and the .NET Android workload for Android projects.
+Requires the .NET 8 SDK and the .NET Android workload for Android projects. No GitHub Actions workflow is used.
+
+Run the repository verification script:
+
+```sh
+sh scripts/verify-dotnet8.sh
+```
+
+The script builds the shared libraries and Android projects, then runs the .NET 8 self-tests. The self-tests validate exFAT boot-region checksum handling and up-case table checksum/decompression/name normalization.
+
 
 ```sh
 dotnet build src/USB.Net.Core/USB.Net.Core.csproj

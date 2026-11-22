@@ -402,6 +402,8 @@ public sealed class AndroidUsbMassStorageReader : IDisposable
     public ExFatVolumeInfo ReadExFatVolume(PartitionInfo partition)
     {
         ValidatePartitionBounds(partition);
+        if (LogicalBlockSize is < 512 or > 4096)
+            throw new NotSupportedException("exFAT boot regions require logical sectors between 512 and 4096 bytes.");
         if (partition.TotalBlocks < ExFatBootRegionValidator.SectorCount * 2UL)
             throw new IOException("The partition is too small to contain both exFAT boot regions.");
         byte[] regions = ReadBlocks(checked((uint)partition.FirstLba), ExFatBootRegionValidator.SectorCount * 2);
