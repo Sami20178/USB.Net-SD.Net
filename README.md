@@ -22,6 +22,7 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 - Desktop mounted-volume enumeration through .NET DriveInfo.
 - Android USB host enumeration for devices declaring the USB mass-storage class.
 - Android USB permission status checks, permission request initiation and permission-result receiver.
+- Android USB storage access through the system folder picker: select a mounted USB volume, keep its permission, list files recursively, read files and create new files.
 - Android system folder picker and persistent read/write URI permission.
 - Recursive, read-only SAF enumeration of files and subfolders.
 - Android SAF reading and creation of new destination documents.
@@ -36,6 +37,12 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 6. When the event arrives, check `HasPermission(device)` again before opening or communicating with the USB device.
 7. Dispose the registration when finished.
 
+## Android USB filesystem access
+
+The Android host app creates `AndroidUsbNetClient(context)` and launches `AndroidUsbNetClient.OpenUsbStoragePickerIntent()`. The user selects the mounted USB drive (preferably its root) in Android's system picker. Pass the result to `SaveSelectedUsbStorage()`, then use `EnumerateUsbStorageAsync()` to list files and folders, `OpenRead()` to read a file, or `CopyFileToUsbAsync()` to create a new file.
+
+`GetConnectedUsbDevicesAsync()` separately lists USB mass-storage devices visible through Android USB host mode. USB host detection and filesystem access are different: a detected USB device is not necessarily mounted as a browsable file volume. The SAF picker is the supported file-level route when Android exposes the drive there.
+
 ## Android SD-card integration
 
 The host application launches `AndroidSdNetClient.CreateFolderPickerIntent()` and passes the result to `SaveSelectedFolder()`. It can then call `EnumerateSelectedFolderAsync()` to recursively list all visible files and folders below that selected location. Enumeration is read-only and returns content URIs, not ordinary filesystem paths. Use `OpenRead()` to read a listed file.
@@ -44,7 +51,7 @@ The host application launches `AndroidSdNetClient.CreateFolderPickerIntent()` an
 
 - SAF enumeration depends on the selected storage provider. Providers may omit metadata or restrict folders.
 - The recursive listing is synchronous internally because Android's ContentResolver query API is synchronous; cancellation is checked between queries and rows.
-- Raw USB mass-storage filesystem communication and mounting are not implemented.
+- Raw USB mass-storage filesystem communication, mounting, and direct sector access are not implemented. USB file access uses Android's mounted-volume/SAF interface and requires the user to select the drive.
 - The Android SAF stream-based copy and Core path-based sync engine are separate; a unified two-way sync engine is still needed.
 - Android SD-card selection is user-driven; the app does not silently scan storage.
 - This code has not yet been built or tested on a physical Fire tablet.
