@@ -402,15 +402,92 @@ public sealed class AndroidUsbMassStorageReader : IDisposable
     public ExFatVolumeInfo ReadExFatVolume(PartitionInfo partition)
     {
         ValidatePartitionBounds(partition);
-        byte[] boot = ReadBlocks(checked((uint)partition.FirstLba), 1);
-        return ExFatBootSectorParser.Parse(boot, LogicalBlockSize, partition.TotalBlocks);
+        if (partition.TotalBlocks < ExFatBootRegionValidator.SectorCount * 2UL)
+            throw new IOException("The partition is too small to contain both exFAT boot regions.");
+        byte[] regions = ReadBlocks(checked((uint)partition.FirstLba), ExFatBootRegionValidator.SectorCount * 2);
+        int regionLength = checked((int)(LogicalBlockSize * ExFatBootRegionValidator.SectorCount));
+        ExFatBootRegionValidator.Validate(regions.AsSpan(0, regionLength), LogicalBlockSize);
+        ExFatBootRegionValidator.Validate(regions.AsSpan(regionLength, regionLength), LogicalBlockSize);
+        return ExFatBootSectorParser.Parse(regions.AsSpan(0, checked((int)LogicalBlockSize)),
+            LogicalBlockSize, partition.TotalBlocks);
+    }
+
+
+    /// <summary>Finds, reads and validates the root directory's exFAT up-case table.</summary>
+    public ExFatUpcaseTable ReadExFatUpcaseTable(PartitionInfo partition, ExFatVolumeInfo volume,
+        int maxTableBytes = 1024 * 1024, int maxClusters = 4096,
+        CancellationToken cancellationToken = default)
+    {
+        ValidatePartitionBounds(partition);
+        if (volume.BytesPerSector != LogicalBlockSize || volume.ClusterCount == 0 ||
+            volume.VolumeLength > partition.TotalBlocks)
+            throw new ArgumentException("Invalid exFAT volume geometry.", nameof(volume));
+        if (maxTableBytes is < 2 or > 16 * 1024 * 1024 || maxClusters is < 1 or > 65536)
+            throw new ArgumentOutOfRangeException(nameof(maxTableBytes));
+        uint rootCluster = volume.RootDirectoryCluster;
+        var visitedRoot = new HashSet<uint>();
+        uint tableCluster = 0, tableChecksum = 0;
+        ulong tableLength = 0;
+        for (int i = 0; i < maxClusters; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ValidateExFatCluster(rootCluster, volume);
+            if (!visitedRoot.Add(rootCluster)) throw new IOException("The exFAT root directory chain contains a cycle.");
+            ulong relative = (ulong)volume.ClusterHeapOffset + (rootCluster - 2UL) * volume.SectorsPerCluster;
+            if (relative + volume.SectorsPerCluster > volume.VolumeLength) throw new IOException("The exFAT root directory lies outside the volume.");
+            byte[] directory = ReadBlocks(checked((uint)(partition.FirstLba + relative)), volume.SectorsPerCluster, cancellationToken);
+            for (int offset = 0; offset + 32 <= directory.Length; offset += 32)
+            {
+                byte type = directory[offset];
+                if (type == 0) throw new IOException("The exFAT root directory has no up-case table entry.");
+                if (type != 0x82) continue;
+                tableChecksum = BinaryPrimitives.ReadUInt32LittleEndian(directory.AsSpan(offset + 4, 4));
+                tableCluster = BinaryPrimitives.ReadUInt32LittleEndian(directory.AsSpan(offset + 20, 4));
+                tableLength = BinaryPrimitives.ReadUInt64LittleEndian(directory.AsSpan(offset + 24, 8));
+                break;
+            }
+            if (tableCluster != 0) break;
+            uint next = ReadExFatEntry(partition, volume, rootCluster, cancellationToken);
+            if (next >= 0xFFFFFFF8) break;
+            if (next < 2 || next == 0xFFFFFFF7 || next is >= 0xFFFFFFF0 and <= 0xFFFFFFF6)
+                throw new IOException("The exFAT root directory chain contains an invalid cluster marker.");
+            rootCluster = next;
+        }
+        if (tableCluster == 0 || tableLength == 0 || tableLength > (ulong)maxTableBytes || (tableLength & 1) != 0)
+            throw new IOException("A valid exFAT up-case table entry was not found or exceeds the configured limit.");
+        ValidateExFatCluster(tableCluster, volume);
+        byte[] tableData = new byte[checked((int)tableLength)];
+        ulong requiredClusters = (tableLength + volume.ClusterBytes - 1) / volume.ClusterBytes;
+        uint cluster = tableCluster;
+        ulong copied = 0;
+        var visited = new HashSet<uint>();
+        for (ulong i = 0; i < requiredClusters; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!visited.Add(cluster)) throw new IOException("The exFAT up-case table chain contains a cycle.");
+            ValidateExFatCluster(cluster, volume);
+            ulong clusterRelative = (ulong)volume.ClusterHeapOffset + (cluster - 2UL) * volume.SectorsPerCluster;
+            if (clusterRelative + volume.SectorsPerCluster > volume.VolumeLength) throw new IOException("The exFAT up-case table points outside the volume.");
+            byte[] chunk = ReadBlocks(checked((uint)(partition.FirstLba + clusterRelative)), volume.SectorsPerCluster, cancellationToken);
+            int take = checked((int)Math.Min((ulong)chunk.Length, tableLength - copied));
+            Buffer.BlockCopy(chunk, 0, tableData, checked((int)copied), take);
+            copied += (uint)take;
+            if (copied >= tableLength) break;
+            uint next = ReadExFatEntry(partition, volume, cluster, cancellationToken);
+            if (next >= 0xFFFFFFF8) throw new IOException("The exFAT up-case table chain ended before DataLength.");
+            if (next < 2 || next == 0xFFFFFFF7 || next is >= 0xFFFFFFF0 and <= 0xFFFFFFF6)
+                throw new IOException("The exFAT up-case table chain contains an invalid cluster marker.");
+            cluster = next;
+        }
+        if (copied != tableLength) throw new IOException("The exFAT up-case table could not be read completely.");
+        return ExFatUpcaseTable.Parse(tableData, tableChecksum);
     }
 
     /// <summary>Lists the exFAT root directory or a selected directory cluster.</summary>
     public IReadOnlyList<ExFatDirectoryEntry> ReadExFatDirectory(PartitionInfo partition,
         ExFatVolumeInfo volume, uint? directoryCluster = null, bool directoryNoFatChain = false,
         int maxEntries = 10000, int maxClusters = 4096,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, ExFatUpcaseTable? upcaseTable = null)
     {
         ValidatePartitionBounds(partition);
         if (volume.BytesPerSector != LogicalBlockSize) throw new ArgumentException("Sector size mismatch.", nameof(volume));
@@ -428,7 +505,7 @@ public sealed class AndroidUsbMassStorageReader : IDisposable
             ulong relative = (ulong)volume.ClusterHeapOffset + (cluster - 2UL) * volume.SectorsPerCluster;
             if (relative + volume.SectorsPerCluster > volume.VolumeLength) throw new IOException("exFAT directory cluster is outside volume.");
             byte[] data = ReadBlocks(checked((uint)(partition.FirstLba + relative)), volume.SectorsPerCluster, cancellationToken);
-            output.AddRange(ExFatDirectoryParser.Parse(data, out endMarker));
+            output.AddRange(ExFatDirectoryParser.Parse(data, out endMarker, upcaseTable));
             if (output.Count > maxEntries) throw new IOException("exFAT directory exceeded the entry limit.");
             if (endMarker) return output;
             if (directoryNoFatChain)

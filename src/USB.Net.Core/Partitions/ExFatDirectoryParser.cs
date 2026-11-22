@@ -6,7 +6,7 @@ namespace USB.Net.Core.Partitions;
 /// <summary>Parses exFAT file entry sets (0x85/0xC0/0xC1).</summary>
 public static class ExFatDirectoryParser
 {
-    public static IReadOnlyList<ExFatDirectoryEntry> Parse(ReadOnlySpan<byte> data, out bool endMarkerFound)
+    public static IReadOnlyList<ExFatDirectoryEntry> Parse(ReadOnlySpan<byte> data, out bool endMarkerFound, ExFatUpcaseTable? upcaseTable = null)
     {
         if (data.Length % 32 != 0) throw new IOException("exFAT directory data must contain 32-byte entries.");
         var output = new List<ExFatDirectoryEntry>();
@@ -59,6 +59,7 @@ public static class ExFatDirectoryParser
                 if (validSet)
                 {
                     string name = nameChars.ToString(0, nameLength);
+                    if (upcaseTable is not null) name = upcaseTable.Normalize(name);
                     if (name.Length > 0 && !name.Contains('/') && !name.Contains((char)92))
                     {
                         uint firstCluster = BinaryPrimitives.ReadUInt32LittleEndian(stream.Slice(20, 4));

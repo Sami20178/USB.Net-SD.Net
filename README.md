@@ -26,7 +26,8 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 - Read-only MBR/GPT partition-table detection, GPT CRC validation, and extended MBR/EBR chain traversal.
 - FAT32 boot-sector validation, root/subdirectory listing, VFAT long names, FAT chain checks and bounded file-content reading.
 - FAT16 BPB validation, fixed-root/subdirectory listing, VFAT long names and bounded file-content reading.
-- exFAT boot-sector geometry validation, file-entry-set checksum checks, root/subdirectory listing, FAT-chain and contiguous-file reading.
+- exFAT primary and backup boot-region checksum validation, file-entry-set checksums, root/subdirectory listing, FAT-chain and contiguous-file reading.
+- exFAT compressed up-case table checksum validation, decompression to the complete 65536-entry mapping, and filename normalization.
 - Configurable in-memory file-read limit (64 MiB by default) and cancellation support.
 
 ## Raw USB filesystem reading (read-only)
@@ -59,7 +60,8 @@ Pass a directory entry's `FirstCluster` to list a FAT16 subdirectory.
 
 ```csharp
 var volume = reader.ReadExFatVolume(partition);
-var entries = reader.ReadExFatDirectory(partition, volume);
+var upcase = reader.ReadExFatUpcaseTable(partition, volume);
+var entries = reader.ReadExFatDirectory(partition, volume, upcaseTable: upcase);
 var file = entries.First(x => !x.IsDirectory);
 byte[] content = reader.ReadExFatFile(partition, volume, file);
 ```
@@ -75,8 +77,8 @@ For ordinary Android file access, the USB and SD clients also support Android's 
 ## Limitations and verification
 
 - Raw block reading supports SCSI transparent-command / Bulk-Only Transport devices only.
-- exFAT parsing validates the primary boot-sector geometry and file-entry-set checksums; full boot-region checksum validation and the exFAT up-case-table based name normalization are not yet implemented.
-- The raw filesystem readers have not been compiled or tested on a physical USB device in this change. Treat this as implementation code requiring build and test verification before relying on it for important data.
+- exFAT primary and backup boot-region checksums are validated. The root-directory up-case table is located, checksum-validated, decompressed and can be supplied to directory parsing for filename normalization.
+- The .NET 8 self-test project covers exFAT boot-region checksums and up-case normalization. The source has not yet been built with the .NET 8 SDK in this environment and has not been tested on a physical USB device.
 - No GitHub Actions workflow is required.
 
 ## Build
