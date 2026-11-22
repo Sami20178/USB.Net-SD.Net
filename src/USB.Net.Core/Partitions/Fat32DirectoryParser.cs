@@ -141,7 +141,7 @@ public static class Fat32DirectoryParser
             return null;
 
         string result = new(characters.ToArray());
-        return result.Contains('/') || result.Contains('\\\\') ? null : result;
+        return result.Contains('/') || result.Contains((char)92) ? null : result;
     }
 
     private static void AppendNameCharacters(byte[] part, List<char> output)
