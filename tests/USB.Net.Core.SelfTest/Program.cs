@@ -2,7 +2,7 @@ using System.Buffers.Binary;
 using System.Numerics;
 using System.Text;
 using USB.Net.Core.Cache;
-using USB.Net.Core.Partitions;
+using USB.Net.Core.Partitions;\nusing USB.Net.Core.Wireless;
 
 static void Assert(bool condition, string message)
 {

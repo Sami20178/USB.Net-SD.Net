@@ -94,9 +94,17 @@ var cachedFiles = cache.GetFiles();
 await using var offlineCopy = cache.OpenRead(saved);
 ```
 
-This is the first building block for offline access. It does not magically read a disconnected device: the file must have been cached earlier or supplied by another device. Wireless transfer and remote USB hosting are separate features still to be implemented and tested.
+This is the first building block for offline access. It does not magically read a disconnected device: the file must have been cached earlier or supplied by another device. Remote USB hosting is a separate feature still to be implemented and tested.
 
-## Empty-device behavior
+
+## Encrypted local Wi-Fi file transfer
+
+USB.Net.Core provides a one-file sender and receiver for a local network. Start the receiver first. The receiving device creates a random 256-bit invite code and shares it privately with the intended sender. The code is never sent over the network. Metadata and file chunks use AES-256-GCM encryption. The receiver verifies the completed file with SHA-256 before publishing it. Existing destination files are never overwritten, and incomplete temporary files are removed after errors.
+
+Receiver API: create a code with WirelessFileTransfer.CreateInviteCode(), then call ReceiveOneFileAsync(IPAddress.Any, port, code, destinationFolder). Sender API: call SendFileAsync(receiverIpAddress, port, sameCode, sourceFilePath). Both devices must be on a network that allows them to reach each other.
+
+The default maximum file size is 4 GiB. This is a transport building block, not yet a complete Android setup screen or automatic device-discovery feature. The app must obtain network permissions, help users choose a reachable local IP address and destination folder, and explain that the receiver temporarily listens for one incoming connection. Use a trusted local network; do not expose the receiver port to the public internet. Share the invite code only with the intended device. This version transfers one file per receiver session; queues and multi-file sessions remain future work.
+\n## Empty-device behavior
 
 The status APIs can show “no device currently visible” while USB.Net and SD.Net remain usable for device discovery and settings. USB status is a point-in-time enumeration and should be refreshed after Android USB attach/detach events. Android's Storage Access Framework does not reliably reveal whether an empty physical SD-card slot exists; SD.Net therefore reports whether an SD folder was selected, not whether the slot itself is physically empty. Files on a removed device cannot be read until it is reconnected. These APIs do not run a background watcher by themselves.
 
@@ -104,7 +112,7 @@ The status APIs can show “no device currently visible” while USB.Net and SD.
 
 - Raw block reading supports SCSI transparent-command / Bulk-Only Transport devices only.
 - exFAT primary and backup boot-region checksums are validated. The root-directory up-case table is located, checksum-validated, decompressed and can be supplied to directory parsing for filename normalization.
-- The .NET 8 self-test project covers exFAT boot-region checksums and up-case normalization. The source has not yet been built with the .NET 8 SDK in this environment and has not been tested on a physical USB device.
+- The .NET 8 self-test project covers exFAT boot-region checksums, up-case normalization, offline cache import/open, and a loopback encrypted Wi-Fi transfer. The source has not yet been built with the .NET 8 SDK in this environment and has not been tested on a physical USB device.
 - No GitHub Actions workflow is required.
 
 ## Build and self-tests
@@ -117,7 +125,7 @@ Run the repository verification script:
 sh scripts/verify-dotnet8.sh
 ```
 
-The script builds the shared libraries and Android projects, then runs the .NET 8 self-tests. The self-tests validate exFAT boot-region checksum handling and up-case table checksum/decompression/name normalization.
+The script builds the shared libraries and Android projects, then runs the .NET 8 self-tests. The self-tests validate exFAT boot-region checksum handling, up-case table checksum/decompression/name normalization, offline cache import/open, and a loopback encrypted Wi-Fi transfer.
 
 
 ```sh
