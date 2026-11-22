@@ -52,7 +52,42 @@ public sealed class AndroidStorageAccess
         _contentResolver.OpenInputStream(documentUri)
         ?? throw new IOException("Android could not open the selected document.");
 
-    public Stream OpenWrite(Uri documentUri) =>
-        _contentResolver.OpenOutputStream(documentUri, "wt")
-        ?? throw new IOException("Android could not open the destination document for writing.");
+    /// <summary>
+    /// Creates a new file in a folder selected through SAF and copies source into it.
+    /// It never opens an existing file for writing.
+    /// </summary>
+    public async Task<Uri> CopyFileAsNewDocumentAsync(
+        Uri treeUri,
+        string displayName,
+        string mimeType,
+        Stream source,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(treeUri);
+        ArgumentException.ThrowIfNullOrWhiteSpace(displayName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(mimeType);
+        ArgumentNullException.ThrowIfNull(source);
+
+        var treeDocumentId = DocumentsContract.GetTreeDocumentId(treeUri);
+        var parentDocumentUri = DocumentsContract.BuildDocumentUriUsingTree(treeUri, treeDocumentId);
+        var createdUri = DocumentsContract.CreateDocument(
+            _contentResolver, parentDocumentUri, mimeType, displayName)
+            ?? throw new IOException("Android could not create the destination document.");
+
+        try
+        {
+            await using var destination = _contentResolver.OpenOutputStream(createdUri, "w")
+                ?? throw new IOException("Android could not open the new document for writing.");
+
+            await source.CopyToAsync(destination, 81920, cancellationToken);
+            await destination.FlushAsync(cancellationToken);
+            return createdUri;
+        }
+        catch
+        {
+            try { DocumentsContract.DeleteDocument(_contentResolver, createdUri); }
+            catch (Java.Lang.Exception) { /* Keep the original copy error. */ }
+            throw;
+        }
+    }
 }
