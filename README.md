@@ -77,6 +77,25 @@ All raw block operations in this reader are read-only. File reads return bytes t
 
 For ordinary Android file access, the USB and SD clients also support Android's user-selected Storage Access Framework locations. The user selects the storage location through the system picker; the app does not silently scan storage.
 
+
+## Offline file cache
+
+USB.Net.Core includes an app-managed offline cache. After the app has permission to read a file from USB, SD, internal storage, or a remote source, it can copy the file into the cache with `OfflineFileCache.ImportAsync`. The cached copy can then be listed and opened after the original USB stick or SD card has been disconnected.
+
+The cache stores content by SHA-256 and keeps a small metadata record with the original file name and source label. It does not modify the original device. The default per-file cache limit is 1 GiB and can be changed when creating the cache. The app must choose a suitable private cache directory and manage available storage space.
+
+Example:
+
+```csharp
+var cache = new OfflineFileCache(cacheDirectory);
+await using var source = File.OpenRead(sourceFilePath);
+var saved = await cache.ImportAsync(source, Path.GetFileName(sourceFilePath), "USB stick");
+var cachedFiles = cache.GetFiles();
+await using var offlineCopy = cache.OpenRead(saved);
+```
+
+This is the first building block for offline access. It does not magically read a disconnected device: the file must have been cached earlier or supplied by another device. Wireless transfer and remote USB hosting are separate features still to be implemented and tested.
+
 ## Empty-device behavior
 
 The status APIs can show “no device currently visible” while USB.Net and SD.Net remain usable for device discovery and settings. USB status is a point-in-time enumeration and should be refreshed after Android USB attach/detach events. Android's Storage Access Framework does not reliably reveal whether an empty physical SD-card slot exists; SD.Net therefore reports whether an SD folder was selected, not whether the slot itself is physically empty. Files on a removed device cannot be read until it is reconnected. These APIs do not run a background watcher by themselves.

@@ -1,6 +1,9 @@
 using System.Buffers.Binary;
 using System.Numerics;
+using System.Text;
+using USB.Net.Core.Cache;
 using USB.Net.Core.Partitions;
+
 static void Assert(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
@@ -43,6 +46,29 @@ static void TestUpcase()
     try { ExFatUpcaseTable.Parse(data, 0); } catch (IOException) { rejected = true; }
     Assert(rejected, "Invalid up-case checksum accepted.");
 }
+static async Task TestOfflineCache()
+{
+    var root = Path.Combine(Path.GetTempPath(), "usb-net-cache-test-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var cache = new OfflineFileCache(root, 1024);
+        var original = Encoding.UTF8.GetBytes("USB.Net offline cache test");
+        await using var source = new MemoryStream(original);
+        var entry = await cache.ImportAsync(source, "test.txt", "USB stick");
+        Assert(entry.SizeBytes == original.Length, "Cached size is incorrect.");
+        Assert(cache.GetFiles().Count == 1, "Cached file was not indexed.");
+        await using var cached = cache.OpenRead(entry);
+        using var copy = new MemoryStream();
+        await cached.CopyToAsync(copy);
+        Assert(copy.ToArray().SequenceEqual(original), "Cached content differs from source.");
+        Assert(entry.SourceLabel == "USB stick", "Source label was not retained.");
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
 TestBootRegion();
 TestUpcase();
+await TestOfflineCache();
 Console.WriteLine("USB.Net.Core self-tests passed.");
