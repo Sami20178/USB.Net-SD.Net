@@ -22,6 +22,13 @@ public sealed class UsbNetClient
         CancellationToken cancellationToken = default) =>
         _deviceProvider.GetDevicesAsync(cancellationToken);
 
+    public async ValueTask<StorageDeviceStatus> GetUsbStatusAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var devices = await GetVisibleVolumesAsync(cancellationToken);
+        return StorageDeviceStatus.FromDevices(StorageDeviceKind.UsbMassStorage, devices);
+    }
+
     public SyncPlan PreviewCopy(string sourceFolder, string usbDestinationFolder) =>
         _sync.CreatePlan(sourceFolder, usbDestinationFolder);
 

@@ -36,6 +36,18 @@ public sealed class AndroidUsbNetClient
         _deviceProvider.GetDevicesAsync(cancellationToken);
 
     /// <summary>
+    /// Returns a display-ready snapshot, including the empty state when no
+    /// USB mass-storage device is currently visible to Android.
+    /// Call again after USB attach/detach broadcasts to refresh the snapshot.
+    /// </summary>
+    public async ValueTask<StorageDeviceStatus> GetUsbStatusAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var devices = await GetConnectedUsbDevicesAsync(cancellationToken);
+        return StorageDeviceStatus.FromDevices(StorageDeviceKind.UsbMassStorage, devices);
+    }
+
+    /// <summary>
     /// Opens Android's system folder picker. Select the mounted USB drive, preferably its root.
     /// </summary>
     public static Intent OpenUsbStoragePickerIntent() =>

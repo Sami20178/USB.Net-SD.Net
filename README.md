@@ -20,6 +20,9 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 - Cancellation support and per-file I/O error reporting.
 - Separate USB.Net and SD.Net client libraries using the shared engine.
 - Desktop mounted-volume enumeration through .NET DriveInfo.
+- Display-ready USB/SD presence snapshots that return an explicit empty state instead of requiring a connected device.
+- Android USB status snapshots for the currently visible USB mass-storage devices.
+- Android SD folder-selection status, with an explicit warning that SAF cannot reliably detect an empty physical SD slot.
 - Android USB host enumeration and permission helpers.
 - Android USB storage access through Android's system folder picker and Storage Access Framework.
 - Read-only SCSI USB Mass Storage BOT transport with READ CAPACITY(10) and READ(10).
@@ -73,6 +76,10 @@ All raw block operations in this reader are read-only. File reads return bytes t
 ## Android filesystem access
 
 For ordinary Android file access, the USB and SD clients also support Android's user-selected Storage Access Framework locations. The user selects the storage location through the system picker; the app does not silently scan storage.
+
+## Empty-device behavior
+
+The status APIs can show “no device currently visible” while USB.Net and SD.Net remain usable for device discovery and settings. USB status is a point-in-time enumeration and should be refreshed after Android USB attach/detach events. Android's Storage Access Framework does not reliably reveal whether an empty physical SD-card slot exists; SD.Net therefore reports whether an SD folder was selected, not whether the slot itself is physically empty. Files on a removed device cannot be read until it is reconnected. These APIs do not run a background watcher by themselves.
 
 ## Limitations and verification
 

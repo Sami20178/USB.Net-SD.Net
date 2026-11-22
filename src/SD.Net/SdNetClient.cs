@@ -22,6 +22,13 @@ public sealed class SdNetClient
         CancellationToken cancellationToken = default) =>
         _deviceProvider.GetDevicesAsync(cancellationToken);
 
+    public async ValueTask<StorageDeviceStatus> GetSdStatusAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var devices = await GetVisibleVolumesAsync(cancellationToken);
+        return StorageDeviceStatus.FromDevices(StorageDeviceKind.SdCard, devices);
+    }
+
     public SyncPlan PreviewCopy(string sourceFolder, string sdDestinationFolder) =>
         _sync.CreatePlan(sourceFolder, sdDestinationFolder);
 

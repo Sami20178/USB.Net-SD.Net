@@ -15,6 +15,16 @@ public sealed class AndroidSdNetClient
     public AndroidSdNetClient(ContentResolver contentResolver) =>
         _storage = new AndroidStorageAccess(contentResolver);
 
+    /// <summary>
+    /// Reports whether the app has a selected SD-card folder. Android's
+    /// Storage Access Framework does not reliably expose an empty physical
+    /// card slot, so this deliberately does not claim to detect the slot.
+    /// </summary>
+    public static string GetFolderSelectionStatus(Uri? selectedFolderTree) =>
+        selectedFolderTree is null
+            ? "No SD-card folder selected. Insert/select a card to browse its files."
+            : "An SD-card folder is selected. The card must remain available to read it.";
+
     public static Intent CreateFolderPickerIntent() =>
         AndroidStorageAccess.CreateFolderPickerIntent();
 
