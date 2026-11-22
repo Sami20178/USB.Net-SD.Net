@@ -4,9 +4,9 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 
 ## Modules
 
-- **USB.Net** — USB storage file-transfer client.
-- **SD.Net** — SD-card file-transfer client.
-- **USB.Net.Core** — shared storage models and safe copy engine.
+- **USB.Net** — USB storage file-transfer facade.
+- **SD.Net** — SD-card file-transfer facade.
+- **USB.Net.Core** — shared storage models, mounted-volume discovery and safe copy engine.
 
 ## Implemented
 
@@ -17,12 +17,14 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 - Copy execution uses asynchronous streams and creates destination folders.
 - Cancellation support and per-file I/O error reporting.
 - Separate USB.Net and SD.Net client libraries using the shared engine.
+- Mounted-volume enumeration through .NET DriveInfo.
+- Dependency injection of a platform-specific device provider.
 
-## Important platform note
+## Device discovery limitation
 
-The library accepts folder paths that the application is already allowed to access. It does not silently mount removable media or bypass operating-system permissions. On Android, applications normally need the Storage Access Framework or USB host permission. On desktop systems, the caller can pass a mounted drive folder.
+The built-in provider lists volumes already mounted and visible to the current process. It does not mount devices, request permissions, or reliably distinguish a USB stick from an SD card. .NET DriveInfo does not expose a portable physical-bus identifier. For that reason, discovered devices are marked `Unknown` rather than being incorrectly classified.
 
-The current copy engine is one-way. It is not yet a two-way synchronizer and does not yet identify a physical device as USB versus SD automatically.
+On Android, use the Storage Access Framework for user-selected folders and Android USB host APIs for compatible USB devices. Those Android-specific adapters are not implemented yet.
 
 ## Build
 
