@@ -241,6 +241,300 @@ public sealed class AndroidUsbMassStorageReader : IDisposable
         }
     }
 
+
+    /// <summary>Reads one FAT32 file into memory. The default limit is 64 MiB.</summary>
+    public byte[] ReadFat32File(PartitionInfo partition, Fat32VolumeInfo volume,
+        Fat32DirectoryEntry file, int maxBytes = 64 * 1024 * 1024,
+        CancellationToken cancellationToken = default)
+    {
+        ValidatePartitionBounds(partition);
+        if (volume.BytesPerSector != LogicalBlockSize || volume.SectorsPerCluster == 0 ||
+            volume.SectorsPerFat == 0 || volume.TotalSectors > partition.TotalBlocks)
+            throw new ArgumentException("Invalid FAT32 volume geometry.", nameof(volume));
+        ArgumentNullException.ThrowIfNull(file);
+        if (file.IsDirectory) throw new ArgumentException("The selected FAT32 entry is a directory.", nameof(file));
+        if (maxBytes < 0 || file.SizeBytes > maxBytes)
+            throw new IOException("The FAT32 file exceeds the configured read limit.");
+        if (file.SizeBytes == 0) return Array.Empty<byte>();
+        ValidateCluster(file.FirstCluster, volume);
+        ulong clusterBytes = (ulong)volume.BytesPerSector * volume.SectorsPerCluster;
+        ulong firstData = (ulong)volume.ReservedSectorCount + (ulong)volume.FatCount * volume.SectorsPerFat;
+        byte[] result = new byte[checked((int)file.SizeBytes)];
+        var visited = new HashSet<uint>();
+        var fatCache = new Dictionary<ulong, byte[]>();
+        uint cluster = file.FirstCluster;
+        int written = 0;
+        while (written < result.Length)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!visited.Add(cluster)) throw new IOException("FAT32 file chain contains a cycle.");
+            if (visited.Count > volume.ClusterCount) throw new IOException("FAT32 file chain exceeds the volume cluster count.");
+            ulong relative = checked(firstData + (cluster - 2UL) * volume.SectorsPerCluster);
+            if (relative + volume.SectorsPerCluster > volume.TotalSectors)
+                throw new IOException("FAT32 file cluster points outside the volume.");
+            ulong absolute = checked(partition.FirstLba + relative);
+            byte[] data = ReadBlocks(checked((uint)absolute), volume.SectorsPerCluster, cancellationToken);
+            int take = Math.Min(data.Length, result.Length - written);
+            Buffer.BlockCopy(data, 0, result, written, take);
+            written += take;
+            if (written >= result.Length) break;
+
+            ulong fatByte = (ulong)cluster * 4;
+            ulong fatSectorIndex = fatByte / volume.BytesPerSector;
+            int offset = (int)(fatByte % volume.BytesPerSector);
+            if (fatSectorIndex >= volume.SectorsPerFat) throw new IOException("FAT32 entry lies outside FAT.");
+            if (!fatCache.TryGetValue(fatSectorIndex, out byte[]? fatSector))
+            {
+                ulong fatLba = checked(partition.FirstLba + volume.ReservedSectorCount + fatSectorIndex);
+                fatSector = ReadBlocks(checked((uint)fatLba), 1, cancellationToken);
+                fatCache[fatSectorIndex] = fatSector;
+            }
+            uint next = BinaryPrimitives.ReadUInt32LittleEndian(fatSector.AsSpan(offset, 4)) & 0x0FFFFFFF;
+            if (next >= 0x0FFFFFF8) throw new IOException("FAT32 file chain ended before the declared file size.");
+            if (next < 2 || next == 0x0FFFFFF7 || next is >= 0x0FFFFFF0 and <= 0x0FFFFFF6)
+                throw new IOException("FAT32 file chain contains a free, bad, or reserved cluster.");
+            ValidateCluster(next, volume);
+            cluster = next;
+        }
+        return result;
+    }
+
+    /// <summary>Reads and validates a FAT16 boot sector.</summary>
+    public Fat16VolumeInfo ReadFat16Volume(PartitionInfo partition)
+    {
+        ValidatePartitionBounds(partition);
+        byte[] boot = ReadBlocks(checked((uint)partition.FirstLba), 1);
+        return Fat16BootSectorParser.Parse(boot, LogicalBlockSize, partition.TotalBlocks);
+    }
+
+    /// <summary>Lists FAT16 root or subdirectory entries. Long VFAT names are decoded too.</summary>
+    public IReadOnlyList<Fat16DirectoryEntry> ReadFat16Directory(PartitionInfo partition,
+        Fat16VolumeInfo volume, uint? directoryCluster = null, int maxEntries = 10000,
+        int maxClusters = 4096, CancellationToken cancellationToken = default)
+    {
+        ValidatePartitionBounds(partition);
+        if (maxEntries is < 1 or > 100000 || maxClusters is < 1 or > 65536)
+            throw new ArgumentOutOfRangeException(nameof(maxEntries));
+        if (volume.BytesPerSector != LogicalBlockSize) throw new ArgumentException("Sector size mismatch.", nameof(volume));
+        var bytes = new List<byte[]>();
+        var pending = new List<byte[]>();
+        bool ended = false;
+        if (directoryCluster is null)
+        {
+            uint rootSectors = checked((uint)(((ulong)volume.RootEntryCount * 32 + volume.BytesPerSector - 1) / volume.BytesPerSector));
+            ulong rootLba = partition.FirstLba + volume.RootDirectoryFirstSector;
+            byte[] root = ReadBlocks(checked((uint)rootLba), rootSectors, cancellationToken);
+            bytes.Add(root);
+        }
+        else
+        {
+            uint cluster = directoryCluster.Value;
+            var visited = new HashSet<uint>();
+            for (int i = 0; i < maxClusters; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ValidateFat16Cluster(cluster, volume);
+                if (!visited.Add(cluster)) throw new IOException("FAT16 directory chain contains a cycle.");
+                ulong relative = (ulong)volume.FirstDataSector + (cluster - 2UL) * volume.SectorsPerCluster;
+                if (relative + volume.SectorsPerCluster > volume.TotalSectors) throw new IOException("FAT16 directory cluster is outside volume.");
+                bytes.Add(ReadBlocks(checked((uint)(partition.FirstLba + relative)), volume.SectorsPerCluster, cancellationToken));
+                ushort next = ReadFat16Entry(partition, volume, cluster, cancellationToken);
+                if (next >= 0xFFF8) { ended = true; break; }
+                if (next < 2 || next == 0xFFF7 || next is >= 0xFFF0 and <= 0xFFF6)
+                    throw new IOException("FAT16 directory chain contains an invalid cluster marker.");
+                cluster = next;
+            }
+            if (!ended) throw new IOException("FAT16 directory exceeded the cluster safety limit.");
+        }
+
+        var output = new List<Fat16DirectoryEntry>();
+        foreach (byte[] clusterData in bytes)
+        {
+            var parsed = Fat32DirectoryParser.Parse(clusterData, pending, out bool end);
+            foreach (var entry in parsed)
+                output.Add(new Fat16DirectoryEntry(entry.Name, entry.ShortName, entry.Attributes,
+                    entry.FirstCluster & 0xFFFF, entry.SizeBytes));
+            if (output.Count > maxEntries) throw new IOException("FAT16 directory exceeded the entry limit.");
+            if (end) break;
+        }
+        return output;
+    }
+
+    /// <summary>Reads a FAT16 file into memory, with a configurable maximum size.</summary>
+    public byte[] ReadFat16File(PartitionInfo partition, Fat16VolumeInfo volume,
+        Fat16DirectoryEntry file, int maxBytes = 64 * 1024 * 1024,
+        CancellationToken cancellationToken = default)
+    {
+        ValidatePartitionBounds(partition);
+        if (volume.BytesPerSector != LogicalBlockSize || volume.SectorsPerCluster == 0 ||
+            volume.SectorsPerFat == 0 || volume.TotalSectors > partition.TotalBlocks)
+            throw new ArgumentException("Invalid FAT16 volume geometry.", nameof(volume));
+        ArgumentNullException.ThrowIfNull(file);
+        if (file.IsDirectory) throw new ArgumentException("The selected FAT16 entry is a directory.", nameof(file));
+        if (maxBytes < 0 || file.SizeBytes > maxBytes) throw new IOException("FAT16 file exceeds the configured read limit.");
+        if (file.SizeBytes == 0) return Array.Empty<byte>();
+        ValidateFat16Cluster(file.FirstCluster, volume);
+        byte[] output = new byte[checked((int)file.SizeBytes)];
+        var visited = new HashSet<uint>();
+        uint cluster = file.FirstCluster;
+        int written = 0;
+        while (written < output.Length)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!visited.Add(cluster)) throw new IOException("FAT16 file chain contains a cycle.");
+            ulong relative = (ulong)volume.FirstDataSector + (cluster - 2UL) * volume.SectorsPerCluster;
+            if (relative + volume.SectorsPerCluster > volume.TotalSectors) throw new IOException("FAT16 file cluster is outside volume.");
+            byte[] data = ReadBlocks(checked((uint)(partition.FirstLba + relative)), volume.SectorsPerCluster, cancellationToken);
+            int take = Math.Min(data.Length, output.Length - written);
+            Buffer.BlockCopy(data, 0, output, written, take);
+            written += take;
+            if (written == output.Length) break;
+            ushort next = ReadFat16Entry(partition, volume, cluster, cancellationToken);
+            if (next >= 0xFFF8) throw new IOException("FAT16 file chain ended before the declared file size.");
+            if (next < 2 || next == 0xFFF7 || next is >= 0xFFF0 and <= 0xFFF6)
+                throw new IOException("FAT16 file chain contains an invalid cluster marker.");
+            ValidateFat16Cluster(next, volume);
+            cluster = next;
+        }
+        return output;
+    }
+
+    /// <summary>Reads and validates an exFAT boot sector.</summary>
+    public ExFatVolumeInfo ReadExFatVolume(PartitionInfo partition)
+    {
+        ValidatePartitionBounds(partition);
+        byte[] boot = ReadBlocks(checked((uint)partition.FirstLba), 1);
+        return ExFatBootSectorParser.Parse(boot, LogicalBlockSize, partition.TotalBlocks);
+    }
+
+    /// <summary>Lists the exFAT root directory or a selected directory cluster.</summary>
+    public IReadOnlyList<ExFatDirectoryEntry> ReadExFatDirectory(PartitionInfo partition,
+        ExFatVolumeInfo volume, uint? directoryCluster = null, bool directoryNoFatChain = false,
+        int maxEntries = 10000, int maxClusters = 4096,
+        CancellationToken cancellationToken = default)
+    {
+        ValidatePartitionBounds(partition);
+        if (volume.BytesPerSector != LogicalBlockSize) throw new ArgumentException("Sector size mismatch.", nameof(volume));
+        if (maxEntries is < 1 or > 100000 || maxClusters is < 1 or > 65536)
+            throw new ArgumentOutOfRangeException(nameof(maxEntries));
+        uint cluster = directoryCluster ?? volume.RootDirectoryCluster;
+        var output = new List<ExFatDirectoryEntry>();
+        var visited = new HashSet<uint>();
+        bool endMarker = false;
+        for (int i = 0; i < maxClusters; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ValidateExFatCluster(cluster, volume);
+            if (!directoryNoFatChain && !visited.Add(cluster)) throw new IOException("exFAT directory chain contains a cycle.");
+            ulong relative = (ulong)volume.ClusterHeapOffset + (cluster - 2UL) * volume.SectorsPerCluster;
+            if (relative + volume.SectorsPerCluster > volume.VolumeLength) throw new IOException("exFAT directory cluster is outside volume.");
+            byte[] data = ReadBlocks(checked((uint)(partition.FirstLba + relative)), volume.SectorsPerCluster, cancellationToken);
+            output.AddRange(ExFatDirectoryParser.Parse(data, out endMarker));
+            if (output.Count > maxEntries) throw new IOException("exFAT directory exceeded the entry limit.");
+            if (endMarker) return output;
+            if (directoryNoFatChain)
+            {
+                cluster++;
+                if ((ulong)cluster > volume.ClusterCount + 1) return output;
+            }
+            else
+            {
+                uint next = ReadExFatEntry(partition, volume, cluster, cancellationToken);
+                if (next >= 0xFFFFFFF8) return output;
+                if (next < 2 || next == 0xFFFFFFF7 || next is >= 0xFFFFFFF0 and <= 0xFFFFFFF6)
+                    throw new IOException("exFAT directory chain contains an invalid cluster marker.");
+                cluster = next;
+            }
+        }
+        throw new IOException("exFAT directory exceeded the cluster safety limit.");
+    }
+
+    /// <summary>Reads an exFAT file. Uninitialized bytes after ValidDataLength are returned as zeroes.</summary>
+    public byte[] ReadExFatFile(PartitionInfo partition, ExFatVolumeInfo volume,
+        ExFatDirectoryEntry file, int maxBytes = 64 * 1024 * 1024,
+        CancellationToken cancellationToken = default)
+    {
+        ValidatePartitionBounds(partition);
+        if (volume.BytesPerSector != LogicalBlockSize || volume.ClusterCount == 0 ||
+            volume.ClusterBytes == 0 || volume.VolumeLength > partition.TotalBlocks)
+            throw new ArgumentException("Invalid exFAT volume geometry.", nameof(volume));
+        ArgumentNullException.ThrowIfNull(file);
+        if (file.IsDirectory) throw new ArgumentException("The selected exFAT entry is a directory.", nameof(file));
+        if (file.DataLength > (ulong)Math.Max(0, maxBytes) || file.DataLength > int.MaxValue)
+            throw new IOException("exFAT file exceeds the configured read limit.");
+        if (file.ValidDataLength > file.DataLength) throw new IOException("exFAT ValidDataLength exceeds DataLength.");
+        if (file.DataLength == 0) return Array.Empty<byte>();
+        ValidateExFatCluster(file.FirstCluster, volume);
+        byte[] output = new byte[(int)file.DataLength];
+        ulong remaining = file.ValidDataLength;
+        uint cluster = file.FirstCluster;
+        var visited = new HashSet<uint>();
+        ulong requiredClusters = (file.DataLength + volume.ClusterBytes - 1) / volume.ClusterBytes;
+        for (ulong i = 0; i < requiredClusters && remaining > 0; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!file.NoFatChain && !visited.Add(cluster)) throw new IOException("exFAT file chain contains a cycle.");
+            ValidateExFatCluster(cluster, volume);
+            ulong relative = (ulong)volume.ClusterHeapOffset + (cluster - 2UL) * volume.SectorsPerCluster;
+            byte[] data = ReadBlocks(checked((uint)(partition.FirstLba + relative)), volume.SectorsPerCluster, cancellationToken);
+            int take = (int)Math.Min((ulong)data.Length, remaining);
+            int outputOffset = checked((int)(i * volume.ClusterBytes));
+            Buffer.BlockCopy(data, 0, output, outputOffset, take);
+            remaining -= (uint)take;
+            if (remaining == 0 || i + 1 >= requiredClusters) break;
+            if (file.NoFatChain) cluster++;
+            else
+            {
+                uint next = ReadExFatEntry(partition, volume, cluster, cancellationToken);
+                if (next >= 0xFFFFFFF8) throw new IOException("exFAT file chain ended before ValidDataLength.");
+                if (next < 2 || next == 0xFFFFFFF7 || next is >= 0xFFFFFFF0 and <= 0xFFFFFFF6)
+                    throw new IOException("exFAT file chain contains an invalid cluster marker.");
+                cluster = next;
+            }
+        }
+        return output;
+    }
+
+    private void ValidatePartitionBounds(PartitionInfo partition)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        ulong capacity = (ulong)LastLogicalBlockAddress + 1;
+        if (partition.FirstLba > uint.MaxValue || partition.TotalBlocks == 0 ||
+            partition.FirstLba >= capacity || partition.TotalBlocks > capacity - partition.FirstLba)
+            throw new ArgumentOutOfRangeException(nameof(partition), "Partition is outside device capacity.");
+    }
+
+    private static void ValidateFat16Cluster(uint cluster, Fat16VolumeInfo volume)
+    {
+        if (cluster < 2 || cluster > volume.ClusterCount + 1) throw new IOException("FAT16 cluster is outside the data region.");
+    }
+
+    private ushort ReadFat16Entry(PartitionInfo partition, Fat16VolumeInfo volume, uint cluster, CancellationToken token)
+    {
+        ulong byteOffset = (ulong)cluster * 2;
+        ulong sector = byteOffset / volume.BytesPerSector;
+        int offset = (int)(byteOffset % volume.BytesPerSector);
+        if (sector >= volume.SectorsPerFat) throw new IOException("FAT16 entry lies outside FAT.");
+        byte[] data = ReadBlocks(checked((uint)(partition.FirstLba + volume.ReservedSectorCount + sector)), 1, token);
+        return BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset, 2));
+    }
+
+    private static void ValidateExFatCluster(uint cluster, ExFatVolumeInfo volume)
+    {
+        if (cluster < 2 || (ulong)cluster > (ulong)volume.ClusterCount + 1)
+            throw new IOException("exFAT cluster is outside the cluster heap.");
+    }
+
+    private uint ReadExFatEntry(PartitionInfo partition, ExFatVolumeInfo volume, uint cluster, CancellationToken token)
+    {
+        ulong byteOffset = (ulong)cluster * 4;
+        ulong sector = byteOffset / volume.BytesPerSector;
+        int offset = (int)(byteOffset % volume.BytesPerSector);
+        if (sector >= volume.FatLength) throw new IOException("exFAT entry lies outside FAT.");
+        byte[] data = ReadBlocks(checked((uint)(partition.FirstLba + volume.FatOffset + sector)), 1, token);
+        return BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset, 4));
+    }
+
     private static void ValidateCluster(uint cluster, Fat32VolumeInfo volume)
     {
         if (cluster < 2 || (ulong)cluster > volume.ClusterCount + 1)
