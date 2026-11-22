@@ -21,6 +21,11 @@ public sealed class AndroidSdNetClient
     public Uri SaveSelectedFolder(Intent pickerResult) =>
         _storage.PersistFolderPermission(pickerResult);
 
+    public Task<IReadOnlyList<AndroidStorageItem>> EnumerateSelectedFolderAsync(
+        Uri selectedFolderTree,
+        CancellationToken cancellationToken = default) =>
+        _storage.EnumerateTreeAsync(selectedFolderTree, cancellationToken);
+
     public Stream OpenRead(Uri documentUri) =>
         _storage.OpenRead(documentUri);
 

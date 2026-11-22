@@ -8,7 +8,7 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 - **SD.Net** — SD-card file-transfer facade.
 - **USB.Net.Core** — shared storage models, mounted-volume discovery and safe copy engine.
 - **USB.Net.Android** — Android USB mass-storage discovery, permission request and permission-result helpers.
-- **SD.Net.Android** — Android SD-card folder access using the Storage Access Framework.
+- **SD.Net.Android** — Android SD-card folder access and recursive listing through the Storage Access Framework.
 
 ## Implemented
 
@@ -21,9 +21,9 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 - Separate USB.Net and SD.Net client libraries using the shared engine.
 - Desktop mounted-volume enumeration through .NET DriveInfo.
 - Android USB host enumeration for devices declaring the USB mass-storage class.
-- Android USB permission status checks and permission request initiation.
-- Android USB permission-result BroadcastReceiver with safe registration and disposal.
+- Android USB permission status checks, permission request initiation and permission-result receiver.
 - Android system folder picker and persistent read/write URI permission.
+- Recursive, read-only SAF enumeration of files and subfolders.
 - Android SAF reading and creation of new destination documents.
 
 ## Android USB permission flow
@@ -36,22 +36,18 @@ A .NET library for transferring files to user-selected USB storage and SD-card f
 6. When the event arrives, check `HasPermission(device)` again before opening or communicating with the USB device.
 7. Dispose the registration when finished.
 
-The receiver is registered as not-exported on Android 13 and newer. The host app must still manage Activity lifecycle and must not treat a granted permission as proof that a USB filesystem has been mounted.
+## Android SD-card integration
 
-## Android SD integration
-
-The host application launches `AndroidSdNetClient.CreateFolderPickerIntent()` from an Activity and passes the returned result to `SaveSelectedFolder()`. Keep the returned URI string if it needs to reopen the folder later. Android's system picker controls which folders are available.
-
-`AndroidSdNetClient` provides user-selected SD-card folder access, reading, and safe creation/copy of new files. The app must supply a source stream and a folder URI returned by the system picker.
+The host application launches `AndroidSdNetClient.CreateFolderPickerIntent()` and passes the result to `SaveSelectedFolder()`. It can then call `EnumerateSelectedFolderAsync()` to recursively list all visible files and folders below that selected location. Enumeration is read-only and returns content URIs, not ordinary filesystem paths. Use `OpenRead()` to read a listed file.
 
 ## Limitations
 
-- USB permission result delivery is implemented as a reusable receiver helper; it has not been tested on a physical Android device.
-- Raw USB mass-storage filesystem communication and mounting are not implemented. Android may mount a USB stick as a normal storage volume instead.
-- The SAF helper does not yet recursively enumerate folder contents.
-- The Core path-based sync engine and Android SAF stream-based copy are separate paths; a unified two-way sync engine is still needed.
+- SAF enumeration depends on the selected storage provider. Providers may omit metadata or restrict folders.
+- The recursive listing is synchronous internally because Android's ContentResolver query API is synchronous; cancellation is checked between queries and rows.
+- Raw USB mass-storage filesystem communication and mounting are not implemented.
+- The Android SAF stream-based copy and Core path-based sync engine are separate; a unified two-way sync engine is still needed.
 - Android SD-card selection is user-driven; the app does not silently scan storage.
-- Physical USB and SD identification is platform-dependent.
+- This code has not yet been built or tested on a physical Fire tablet.
 
 ## Build
 

@@ -1,6 +1,7 @@
 using Android.Content;
 using Android.Provider;
 using Android.Net;
+using Android.Database;
 
 namespace USB.Net.Android.Storage;
 
@@ -15,9 +16,6 @@ public sealed class AndroidStorageAccess
     public AndroidStorageAccess(ContentResolver contentResolver) =>
         _contentResolver = contentResolver ?? throw new ArgumentNullException(nameof(contentResolver));
 
-    /// <summary>
-    /// Creates the system folder-picker intent. Launch it from an Activity.
-    /// </summary>
     public static Intent CreateFolderPickerIntent()
     {
         var intent = new Intent(Intent.ActionOpenDocumentTree);
@@ -27,10 +25,6 @@ public sealed class AndroidStorageAccess
         return intent;
     }
 
-    /// <summary>
-    /// Persists the read/write permission returned by the Android folder picker.
-    /// Store the returned URI string in app preferences if it should be reused later.
-    /// </summary>
     public Uri PersistFolderPermission(Intent result)
     {
         ArgumentNullException.ThrowIfNull(result);
@@ -51,6 +45,87 @@ public sealed class AndroidStorageAccess
     public Stream OpenRead(Uri documentUri) =>
         _contentResolver.OpenInputStream(documentUri)
         ?? throw new IOException("Android could not open the selected document.");
+
+    /// <summary>
+    /// Recursively lists files and folders below the selected tree.
+    /// The returned list includes directories and files, but never modifies storage.
+    /// </summary>
+    public Task<IReadOnlyList<AndroidStorageItem>> EnumerateTreeAsync(
+        Uri treeUri,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(treeUri);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var results = new List<AndroidStorageItem>();
+        var pending = new Stack<(string DocumentId, string RelativePath)>();
+        pending.Push((DocumentsContract.GetTreeDocumentId(treeUri), string.Empty));
+
+        while (pending.Count > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var current = pending.Pop();
+            var childrenUri = DocumentsContract.BuildChildDocumentsUriUsingTree(
+                treeUri, current.DocumentId);
+
+            using var cursor = _contentResolver.Query(
+                childrenUri,
+                new[]
+                {
+                    DocumentsContract.Document.ColumnDocumentId,
+                    DocumentsContract.Document.ColumnDisplayName,
+                    DocumentsContract.Document.ColumnMimeType,
+                    DocumentsContract.Document.ColumnSize,
+                    DocumentsContract.Document.ColumnLastModified
+                },
+                null, null, null);
+
+            if (cursor is null)
+                continue;
+
+            var idIndex = cursor.GetColumnIndex(DocumentsContract.Document.ColumnDocumentId);
+            var nameIndex = cursor.GetColumnIndex(DocumentsContract.Document.ColumnDisplayName);
+            var mimeIndex = cursor.GetColumnIndex(DocumentsContract.Document.ColumnMimeType);
+            var sizeIndex = cursor.GetColumnIndex(DocumentsContract.Document.ColumnSize);
+            var modifiedIndex = cursor.GetColumnIndex(DocumentsContract.Document.ColumnLastModified);
+
+            if (idIndex < 0 || nameIndex < 0 || mimeIndex < 0)
+                throw new IOException("The storage provider returned incomplete document metadata.");
+
+            while (cursor.MoveToNext())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var documentId = cursor.GetString(idIndex);
+                var name = cursor.GetString(nameIndex) ?? string.Empty;
+                var mimeType = cursor.GetString(mimeIndex) ?? "application/octet-stream";
+                var relativePath = string.IsNullOrEmpty(current.RelativePath)
+                    ? name
+                    : $"{current.RelativePath}/{name}";
+                var documentUri = DocumentsContract.BuildDocumentUriUsingTree(treeUri, documentId);
+
+                long? size = sizeIndex >= 0 && !cursor.IsNull(sizeIndex)
+                    ? cursor.GetLong(sizeIndex)
+                    : null;
+                DateTimeOffset? modified = null;
+                if (modifiedIndex >= 0 && !cursor.IsNull(modifiedIndex))
+                {
+                    var unixMilliseconds = cursor.GetLong(modifiedIndex);
+                    if (unixMilliseconds > 0)
+                        modified = DateTimeOffset.FromUnixTimeMilliseconds(unixMilliseconds);
+                }
+
+                var item = new AndroidStorageItem(
+                    documentUri, name, mimeType, size, modified, relativePath);
+                results.Add(item);
+
+                if (item.IsDirectory)
+                    pending.Push((documentId, relativePath));
+            }
+        }
+
+        return Task.FromResult<IReadOnlyList<AndroidStorageItem>>(results);
+    }
 
     /// <summary>
     /// Creates a new file in a folder selected through SAF and copies source into it.
