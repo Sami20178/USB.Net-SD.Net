@@ -78,6 +78,7 @@ public static class PartitionTableParser
             ulong containerEndExclusive = containerStart + container.BlockCount;
             uint currentEbr = container.BaseLba;
             var visited = new HashSet<uint>();
+            bool chainEnded = false;
 
             for (int chainStep = 0; chainStep < maxEbrChainLength; chainStep++)
             {
@@ -116,7 +117,10 @@ public static class PartitionTableParser
                 uint linkCount = BinaryPrimitives.ReadUInt32LittleEndian(linkEntry.Slice(12, 4));
 
                 if (linkType == 0 || linkCount == 0)
+                {
+                    chainEnded = true;
                     break;
+                }
                 if (!IsExtendedPartition(linkType) || linkRelativeStart == 0)
                     throw new IOException("The EBR chain contains an invalid link entry.");
 
@@ -130,7 +134,7 @@ public static class PartitionTableParser
                 currentEbr = (uint)nextEbr;
             }
 
-            if (visited.Count == maxEbrChainLength)
+            if (!chainEnded)
                 throw new IOException("The MBR extended-partition chain exceeds the 256-entry safety limit.");
         }
 
